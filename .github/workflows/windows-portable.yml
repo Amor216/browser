@@ -1,0 +1,129 @@
+name: windows-portable
+
+# Native Windows x64 build.
+# There is no prebuilt V8 for Windows: the first run builds it from source
+# (depot_tools -> gclient sync -> gn/ninja, ~1.5 h) and caches c_v8.lib, so
+# later runs with the same build.zig.zon only compile Lightpanda itself.
+on:
+  workflow_dispatch:
+  push:
+    tags: ["portable-v*"]
+
+permissions:
+  contents: read
+
+env:
+  V8_VERSION: 15.5.35.13
+
+jobs:
+  # Fast compile check of the Zig, C and Rust sources (no V8 build, no link)
+  # so source errors fail in minutes instead of after the V8 build.
+  check:
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/windows-setup
+      - name: zig build check
+        shell: pwsh
+        run: |
+          New-Item "$env:RUNNER_TEMP\c_v8_placeholder.lib" -ItemType File -Force | Out-Null
+          zig build check -Dcpu=x86_64 "-Dprebuilt_v8_path=$env:RUNNER_TEMP\c_v8_placeholder.lib" --summary failures
+          if ($LASTEXITCODE -ne 0) { throw "zig build check failed" }
+
+  build:
+    needs: check
+    runs-on: windows-2025
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/windows-setup
+
+      - name: Restore cached V8
+        id: v8cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: v8-prebuilt
+          key: c_v8-windows-${{ env.V8_VERSION }}-${{ hashFiles('build.zig.zon') }}
+
+      - name: Pre-place gn.exe + ninja.exe (depot_tools archive has no CIPD bootstrap)
+        if: steps.v8cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $dt = "${{ github.workspace }}\.lp-cache\depot_tools-$env:V8_VERSION"
+          New-Item $dt -ItemType Directory -Force | Out-Null
+          $pkgs = @{
+            gn    = 'https://chrome-infra-packages.appspot.com/dl/gn/gn/windows-amd64/+/latest'
+            ninja = 'https://chrome-infra-packages.appspot.com/dl/infra/3pp/tools/ninja/windows-amd64/+/latest'
+          }
+          foreach ($name in $pkgs.Keys) {
+            curl.exe -sSfL --max-time 300 -o "$env:RUNNER_TEMP\$name.zip" $pkgs[$name]
+            Expand-Archive "$env:RUNNER_TEMP\$name.zip" "$env:RUNNER_TEMP\$name" -Force
+            Copy-Item "$env:RUNNER_TEMP\$name\$name.exe" $dt -Force
+          }
+          & "$dt\gn.exe" --version; & "$dt\ninja.exe" --version
+
+      - name: Build lightpanda (V8 from source)
+        if: steps.v8cache.outputs.cache-hit != 'true'
+        shell: cmd
+        run: |
+          set DEPOT_TOOLS_UPDATE=0
+          set DEPOT_TOOLS_WIN_TOOLCHAIN=0
+          set GYP_MSVS_VERSION=2022
+          set PATH=C:\Program Files\Git\usr\bin;%PATH%
+          zig build -Doptimize=ReleaseFast -Dcpu=x86_64 --summary failures > build.log 2>&1 || (type build.log & exit /b 1)
+
+      - name: Build lightpanda (cached V8)
+        if: steps.v8cache.outputs.cache-hit == 'true'
+        shell: pwsh
+        run: |
+          zig build -Doptimize=ReleaseFast -Dcpu=x86_64 "-Dprebuilt_v8_path=${{ github.workspace }}\v8-prebuilt\c_v8.lib" --summary failures
+          if ($LASTEXITCODE -ne 0) { throw "zig build failed" }
+
+      # Runs even when the Lightpanda compile/link fails after V8 finished,
+      # so the next run does not rebuild V8.
+      - name: Stash built V8
+        if: always() && steps.v8cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $lib = Get-ChildItem ".lp-cache\v8-$env:V8_VERSION\out\windows" -Recurse -Filter c_v8.lib -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($lib) {
+            New-Item v8-prebuilt -ItemType Directory -Force | Out-Null
+            Copy-Item $lib.FullName v8-prebuilt\c_v8.lib
+            "Stashed $($lib.FullName) ($([math]::Round($lib.Length / 1MB)) MB)"
+          } else {
+            "No c_v8.lib produced"
+          }
+
+      - name: Save V8 cache
+        if: always() && steps.v8cache.outputs.cache-hit != 'true' && hashFiles('v8-prebuilt/c_v8.lib') != ''
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: v8-prebuilt
+          key: ${{ steps.v8cache.outputs.cache-primary-key }}
+
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          .\zig-out\bin\lightpanda.exe version
+          if ($LASTEXITCODE -ne 0) { throw "lightpanda version failed" }
+          .\zig-out\bin\lightpanda.exe fetch --dump markdown https://example.com
+          if ($LASTEXITCODE -ne 0) { throw "lightpanda fetch failed" }
+
+      - name: Package portable
+        shell: pwsh
+        run: |
+          $pkg = 'lightpanda-portable-windows-x64'
+          New-Item $pkg -ItemType Directory -Force | Out-Null
+          Copy-Item zig-out\bin\lightpanda.exe, README-WINDOWS.txt, LICENSE $pkg
+          foreach ($dll in 'VCRUNTIME140.dll', 'VCRUNTIME140_1.dll') {
+            Copy-Item "$env:SystemRoot\System32\$dll" $pkg
+          }
+          Compress-Archive -Path $pkg -DestinationPath "$pkg.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lightpanda-portable-windows-x64
+          path: lightpanda-portable-windows-x64.zip
+          retention-days: 30

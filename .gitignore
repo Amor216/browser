@@ -8,3 +8,6 @@ zig-out
 lightpanda.id
 /src/rust/target/
 src/snapshot.bin
+/win-port/filtered-libs/
+/v8-prebuilt/
+__pycache__/

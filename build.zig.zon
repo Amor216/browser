@@ -5,8 +5,9 @@
     .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .v8 = .{
-            .url = "https://github.com/lightpanda-io/zig-v8-fork/archive/b73e4fa2d0afe5036745ae7d332cc5cb7e7adb53.tar.gz",
-            .hash = "v8-0.0.0-xddH64tVAwDZKW4zyy2h9cKXeWfWSjupsZIwTbYxSL9T",
+            // Amor216/zig-v8-fork windows-port: upstream b73e4fa + native Windows build
+            .url = "https://github.com/Amor216/zig-v8-fork/archive/2c0893be692570c8e25dbb47c60b3039811ae208.tar.gz",
+            .hash = "v8-0.0.0-xddH6yOQAwCLjzq2pP5UrKTT4leEi6o9oqxHC_RdWQbN",
         },
         // .v8 = .{ .path = "../zig-v8-fork" },
         .brotli = .{
@@ -27,8 +28,9 @@
             .hash = "N-V-__8AACay2gDbHrByjNGWvyH8G9Gp30uRgZqobYOF1nhb",
         },
         .@"boringssl-zig" = .{
-            .url = "git+https://github.com/lightpanda-io/boringssl-zig.git#5b5ad66f65c5cc4323680ab71284403598251678",
-            .hash = "boringssl-0.1.0-VtJeWc1RAADbO4ypofgJivLdDc6yj5O2ifTBlY-ZDHcH",
+            // Amor216/boringssl-zig windows-port: upstream 5b5ad66 + Windows compile flags
+            .url = "https://github.com/Amor216/boringssl-zig/archive/d6829990db55041a47e773f610ab4031019625a8.tar.gz",
+            .hash = "boringssl-0.1.0-VtJeWbxTAADSkwPMY_MRFaD0B9PubehJJNofa2V_fYQ4",
         },
         // .@"boringssl-zig" = .{ .path = "../boringssl-zig" },
         .curl = .{

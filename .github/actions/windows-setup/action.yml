@@ -1,0 +1,61 @@
+name: "Windows build setup"
+description: "Zig, MSVC paths, filtered msvcrt.lib and the Rust gnu target for the native Windows build"
+
+inputs:
+  zig-version:
+    description: "Zig version to install"
+    default: "0.17.0"
+  zig-sha256:
+    description: "SHA-256 of the official zig-x86_64-windows zip (ziglang.org/download/index.json)"
+    default: "b5663f69581dcf391293fbf16c06cb80d81d806545ce618b4d0bab7f0eb8c428"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install Zig (checksum verified)
+      shell: pwsh
+      env:
+        ZIG_VERSION: ${{ inputs.zig-version }}
+        ZIG_SHA256: ${{ inputs.zig-sha256 }}
+      run: |
+        $ProgressPreference = 'SilentlyContinue'
+        $zip = "$env:RUNNER_TEMP\zig.zip"
+        Invoke-WebRequest "https://ziglang.org/download/$env:ZIG_VERSION/zig-x86_64-windows-$env:ZIG_VERSION.zip" -OutFile $zip
+        $actual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+        if ($actual -ne $env:ZIG_SHA256) { throw "zig checksum mismatch: $actual" }
+        Expand-Archive $zip -DestinationPath "$env:RUNNER_TEMP\zig"
+        (Get-ChildItem "$env:RUNNER_TEMP\zig" -Directory).FullName | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+    - name: Locate MSVC toolchain
+      shell: pwsh
+      run: |
+        $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+        $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+        if (-not $vs) { throw "no Visual Studio with the x64 C++ tools found" }
+        & $vswhere -latest -products * -property catalog_productDisplayVersion
+        $ver = (Get-Content "$vs\VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt").Trim()
+        $msvc = "$vs\VC\Tools\MSVC\$ver"
+        "Visual Studio: $vs (MSVC $ver)"
+        "vs2022_install=$vs" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        "LP_MSVC_LIB_X64=$msvc\lib\x64" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        "LP_LIB_EXE=$msvc\bin\Hostx64\x64\lib.exe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+    - name: Generate filtered msvcrt.lib from the installed MSVC
+      shell: pwsh
+      run: |
+        New-Item win-port\filtered-libs -ItemType Directory -Force | Out-Null
+        python win-port\gen-filtered-msvcrt.py "$env:LP_LIB_EXE" "$env:LP_MSVC_LIB_X64\msvcrt.lib" win-port\msvcrt-reference-symbols.txt win-port\filtered-libs\msvcrt.lib
+        if ($LASTEXITCODE -ne 0) { throw "msvcrt.lib filtering failed" }
+
+    - name: Rust target x86_64-pc-windows-gnu
+      shell: bash
+      run: rustup target add x86_64-pc-windows-gnu
+
+    - name: Pre-fetch sqlite amalgamation (zip fetch workaround)
+      shell: pwsh
+      run: |
+        curl.exe -sSfL --max-time 300 -o sqlite.zip https://sqlite.org/2026/sqlite-amalgamation-3530200.zip
+        New-Item sqlite-amalg -ItemType Directory -Force | Out-Null
+        tar -xf sqlite.zip -C sqlite-amalg --strip-components=1
+        # zig fetch hashes the tree; the build only uses it if it matches build.zig.zon
+        zig fetch "${{ github.workspace }}\sqlite-amalg" | Out-Host
