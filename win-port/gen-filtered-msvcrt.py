@@ -1,31 +1,31 @@
 #!/usr/bin/env python3
 """Build the filtered msvcrt.lib from the toolchain's own msvcrt.lib.
 
-The zig (mingw) CRT and MSVC's msvcrt.lib both define the TLS and Control
-Flow Guard support objects (__dyn_tls_init, __guard_* ...), which clash at
-link time. This script removes exactly those object members from the
-Microsoft library installed on the build machine, so no prebuilt binary has
-to be shipped in the repository.
+The zig (mingw) CRT and MSVC's msvcrt.lib both provide the static CRT
+startup, TLS and Control Flow Guard objects (mainCRTStartup, atexit,
+__dyn_tls_init, __guard_* ...), which clash at link time. This script
+removes exactly those static object members from the Microsoft library
+installed on the build machine, so no prebuilt binary has to be shipped in
+the repository.
 
 msvcrt-reference-symbols.txt lists every symbol the filtered library must
-still export. Using the archive's own symbol index (the first linker
-member, the same table the linker reads), a member is removed when it
-exports a symbol outside that list. As a guard against toolchain drift,
-every removed symbol must look like TLS/CFG machinery and at most
-MAX_REMOVED members may go; anything else fails the build loudly instead of
-producing a silently broken library.
+still export (MSVC 14.44, VS 2022). Using the archive's own symbol index (the first
+linker member, the same table the linker reads), a member is removed when
+it exports a symbol outside that list. As a guard against toolchain drift,
+only static object members may be removed, never msvcrt.dll import entries,
+and at most MAX_REMOVED of them; anything else fails the build loudly
+instead of producing a silently broken library.
 
 Usage: python gen-filtered-msvcrt.py <lib.exe> <msvcrt.lib> <reference.txt> <out.lib>
 """
 
-import re
 import struct
 import subprocess
 import sys
 
-MAX_REMOVED = 20
-CLASH_PATTERN = re.compile(r"tls|guard", re.IGNORECASE)
+MAX_REMOVED = 40
 HEADER_SIZE = 60
+IMPORT_OBJECT_SIGNATURE = b"\x00\x00\xff\xff\x00\x00"  # Sig1, Sig2, Version 0
 
 
 def read_header(data, offset):
@@ -73,17 +73,28 @@ def member_name(data, offset, longnames):
     return raw.rstrip("/")
 
 
+def is_import_member(data, offset):
+    body = data[offset + HEADER_SIZE:offset + HEADER_SIZE + len(IMPORT_OBJECT_SIGNATURE)]
+    return body == IMPORT_OBJECT_SIGNATURE
+
+
 def select_removals(data, reference):
     """Return {member name: symbols outside the reference}, or fail."""
     longnames = long_names(data)
-    removals = {}
+    removals, imports = {}, []
     for offset, syms in symbol_index(data).items():
         extra = syms - reference
-        if extra:
-            removals.setdefault(member_name(data, offset, longnames), set()).update(extra)
-    unexpected = sorted(s for syms in removals.values() for s in syms if not CLASH_PATTERN.search(s))
-    if unexpected or len(removals) > MAX_REMOVED:
-        raise SystemExit("refusing to filter: %d members, unexpected symbols %s" % (len(removals), unexpected))
+        if not extra:
+            continue
+        if is_import_member(data, offset):
+            imports.extend(sorted(extra))
+            continue
+        removals.setdefault(member_name(data, offset, longnames), set()).update(extra)
+    if imports:
+        # new msvcrt.dll exports are fine to keep; only static objects clash
+        print("keeping %d import entries not in the reference: %s" % (len(imports), imports[:20]))
+    if len(removals) > MAX_REMOVED:
+        raise SystemExit("refusing to filter: %d static members exceed the limit of %d" % (len(removals), MAX_REMOVED))
     return removals
 
 
